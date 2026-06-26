@@ -31,6 +31,7 @@ print('Classes:', np.unique(y_train_full))
 # ## Cell 3 — FT-Transformer (pure PyTorch) + utilities
 
 # %%
+import json
 import math
 import os
 import torch
@@ -255,12 +256,29 @@ def objective(trial):
 
     return best_acc
 
+def checkpoint_callback(study, trial):
+    """Save best params to Drive after every completed trial — survives session crashes."""
+    if trial.value is None:   # pruned trial, no value to save
+        return
+    checkpoint = {
+        'completed_trials': len([t for t in study.trials if t.value is not None]),
+        'best_trial':  study.best_trial.number,
+        'best_value':  study.best_value,
+        'best_params': study.best_params,
+    }
+    path = os.path.join(SAVE_DIR, 'ft_optuna_checkpoint.json')
+    with open(path, 'w') as f:
+        json.dump(checkpoint, f, indent=2)
+    if study.best_trial.number == trial.number:
+        print(f'  ★ New best {trial.value:.4f} — checkpoint saved to Drive')
+
 study = optuna.create_study(
     direction='maximize',
     pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
     sampler=optuna.samplers.TPESampler(seed=42),
 )
-study.optimize(objective, n_trials=30, show_progress_bar=True)
+study.optimize(objective, n_trials=30, show_progress_bar=True,
+               callbacks=[checkpoint_callback])
 
 print('\nBest val balanced accuracy:', study.best_value)
 print('Best params:', study.best_params)
