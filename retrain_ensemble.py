@@ -53,9 +53,15 @@ final_preds = avg_probs.argmax(axis=1).astype(int)
 
 student_id = '1385'
 os.makedirs('competition_output', exist_ok=True)
+
+# Soft probabilities — used by ensemble_lgbm_ft.py when blending with FT-Transformer
+np.save('lgbm_probs.npy', avg_probs)
+print(f"Saved: lgbm_probs.npy  (shape: {avg_probs.shape})")
+
+# Standalone submission — valid on its own without FT-Transformer
 out_path = f'competition_output/{student_id}_competition_predictions.npz'
 np.savez(out_path, test_predictions=final_preds)
 
 total = (time.time() - t0) / 3600
-print(f"\nSaved: {out_path}  (shape: {final_preds.shape})")
+print(f"Saved: {out_path}  (shape: {final_preds.shape})")
 print(f"Total runtime: {total:.2f} hours")
