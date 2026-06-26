@@ -1,0 +1,13 @@
+{
+  "best_trial": 97,
+  "best_value": 0.946354969331526,
+  "best_params": {
+    "learning_rate": 0.05525073160749127,
+    "num_leaves": 92,
+    "min_child_samples": 129,
+    "feature_fraction": 0.7438783619788816,
+    "bagging_fraction": 0.4978655411520851,
+    "reg_alpha": 1.875215496414817e-05,
+    "reg_lambda": 4.280817347332021e-07
+  }
+}

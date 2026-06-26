@@ -1,0 +1,16 @@
+# Large data files
+*.npz
+*.npy
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# Optuna DB
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
