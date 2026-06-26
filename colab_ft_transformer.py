@@ -195,8 +195,8 @@ def predict_proba(model, X_np, batch_size=1024):
 
 # %%
 TUNE_N      = 50_000   # 2× faster than 100K; enough signal for HPO
-TUNE_EPOCHS = 20
-PATIENCE    = 3        # in eval intervals (eval every 2 epochs → effective patience = 6 epochs)
+TUNE_EPOCHS = 35       # enough for mid/high LRs to converge; low-LR configs failing here is valid signal
+PATIENCE    = 4        # in eval intervals (eval every 2 epochs → effective patience = 8 epochs)
 BATCH_SIZE  = 1024     # safe with Flash Attention + fp16 on 15 GB
 
 rng = np.random.default_rng(42)
@@ -260,7 +260,7 @@ study = optuna.create_study(
     pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
     sampler=optuna.samplers.TPESampler(seed=42),
 )
-study.optimize(objective, n_trials=15, show_progress_bar=True)
+study.optimize(objective, n_trials=30, show_progress_bar=True)
 
 print('\nBest val balanced accuracy:', study.best_value)
 print('Best params:', study.best_params)
