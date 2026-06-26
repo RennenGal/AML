@@ -6,7 +6,7 @@
 # ## Cell 1 — Install dependencies
 
 # %%
-# !pip install optuna --quiet
+!pip install optuna --quiet
 
 # %% [markdown]
 # ## Cell 2 — Mount Google Drive and load data
@@ -44,7 +44,8 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.metrics import balanced_accuracy_score
 import optuna
 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE   = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+SAVE_DIR = '/content/drive/MyDrive/'
 print('Device:', DEVICE)
 
 # Free TF32 speedup on Turing (T4) — negligible accuracy impact
@@ -192,7 +193,7 @@ def predict_proba(model, X_np, batch_size=1024):
     return np.concatenate(probs, axis=0)
 
 # %% [markdown]
-# ## Cell 4 — Optuna tuning (50K subsample, 15 trials)
+# ## Cell 4 — Optuna tuning (50K subsample, 30 trials)
 
 # %%
 TUNE_N      = 50_000   # 2× faster than 100K; enough signal for HPO
@@ -341,7 +342,6 @@ print(f'\nFinal val balanced accuracy: {best_val:.4f}')
 ft_probs = predict_proba(model, X_test)
 print('FT-Transformer probs shape:', ft_probs.shape)
 
-SAVE_DIR = '/content/drive/MyDrive/'
 np.save(os.path.join(SAVE_DIR, 'ft_transformer_probs.npy'), ft_probs)
 print('Saved ft_transformer_probs.npy to Drive')
 

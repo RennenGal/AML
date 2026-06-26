@@ -63,9 +63,9 @@
 
 ## TODO / Next Steps
 - [x] Quick model comparison: LightGBM, XGBoost, CatBoost, RandomForest
-- [x] Optuna tuning of CatBoost → 0.9464
+- [x] Optuna tuning of LightGBM → 0.9464
 - [ ] Run FT-Transformer on Colab T4 (see Round 3 section)
-- [ ] Ensemble CatBoost + FT-Transformer soft probabilities
+- [ ] Ensemble LightGBM + FT-Transformer soft probabilities
 - [ ] Tune ensemble weight based on FT val score
 - [ ] Final submission
 
