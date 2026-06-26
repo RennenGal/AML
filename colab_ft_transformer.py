@@ -17,7 +17,6 @@ drive.mount('/content/drive')
 
 import numpy as np
 
-# Adjust path to wherever you uploaded competition_train.npz in your Drive
 DATA_PATH = '/content/drive/MyDrive/competition_train.npz'
 
 data = np.load(DATA_PATH)
@@ -47,12 +46,13 @@ import optuna
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Device:', DEVICE)
 
-_grad_scaler = GradScaler('cuda')
+# Free TF32 speedup on Turing (T4) — negligible accuracy impact
+torch.set_float32_matmul_precision('high')
+torch.backends.cudnn.benchmark = True
 
 # --- FT-Transformer architecture ---
 
 class FeatureTokenizer(nn.Module):
-    """Projects each scalar feature into a d_token-dimensional embedding."""
     def __init__(self, n_features, d_token):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(n_features, d_token))
@@ -60,18 +60,24 @@ class FeatureTokenizer(nn.Module):
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
 
     def forward(self, x):
-        # x: [B, n_features] → [B, n_features, d_token]
-        return x.unsqueeze(-1) * self.weight + self.bias
+        return x.unsqueeze(-1) * self.weight + self.bias  # [B, n_features, d_token]
 
 
 class TransformerBlock(nn.Module):
-    """Pre-norm Transformer block (LayerNorm before attention and FFN)."""
+    """Pre-norm block using F.scaled_dot_product_attention (Flash Attention on PyTorch 2.x).
+    Avoids materialising the full [B, heads, 501, 501] attention matrix — saves ~4 GB at
+    batch=1024 vs nn.MultiheadAttention."""
     def __init__(self, d_token, n_heads, ffn_d_hidden, attn_dropout, ffn_dropout, residual_dropout):
         super().__init__()
-        self.norm1 = nn.LayerNorm(d_token)
-        self.attn  = nn.MultiheadAttention(d_token, n_heads, dropout=attn_dropout, batch_first=True)
-        self.norm2 = nn.LayerNorm(d_token)
-        self.ffn   = nn.Sequential(
+        self.n_heads   = n_heads
+        self.attn_drop = attn_dropout
+        self.norm1     = nn.LayerNorm(d_token)
+        self.q_proj    = nn.Linear(d_token, d_token)
+        self.k_proj    = nn.Linear(d_token, d_token)
+        self.v_proj    = nn.Linear(d_token, d_token)
+        self.out_proj  = nn.Linear(d_token, d_token)
+        self.norm2     = nn.LayerNorm(d_token)
+        self.ffn       = nn.Sequential(
             nn.Linear(d_token, ffn_d_hidden),
             nn.GELU(),
             nn.Dropout(ffn_dropout),
@@ -80,8 +86,16 @@ class TransformerBlock(nn.Module):
         self.drop = nn.Dropout(residual_dropout)
 
     def forward(self, x):
+        B, T, D = x.shape
+        head_dim = D // self.n_heads
         h = self.norm1(x)
-        h, _ = self.attn(h, h, h)
+        Q = self.q_proj(h).view(B, T, self.n_heads, head_dim).transpose(1, 2)
+        K = self.k_proj(h).view(B, T, self.n_heads, head_dim).transpose(1, 2)
+        V = self.v_proj(h).view(B, T, self.n_heads, head_dim).transpose(1, 2)
+        drop = self.attn_drop if self.training else 0.0
+        h = F.scaled_dot_product_attention(Q, K, V, dropout_p=drop)
+        h = h.transpose(1, 2).contiguous().view(B, T, D)
+        h = self.out_proj(h)
         x = x + self.drop(h)
         x = x + self.drop(self.ffn(self.norm2(x)))
         return x
@@ -101,17 +115,15 @@ class FTTransformer(nn.Module):
         self.head = nn.Linear(d_token, n_classes)
 
     def forward(self, x):
-        tokens = self.tokenizer(x)                        # [B, n_features, d_token]
-        cls    = self.cls_token.expand(x.size(0), -1, -1) # [B, 1, d_token]
-        tokens = torch.cat([tokens, cls], dim=1)           # [B, n_features+1, d_token]
+        tokens = self.tokenizer(x)
+        cls    = self.cls_token.expand(x.size(0), -1, -1)
+        tokens = torch.cat([tokens, cls], dim=1)
         for block in self.blocks:
             tokens = block(tokens)
-        cls_out = self.norm(tokens[:, -1])                 # [B, d_token]
-        return self.head(cls_out)                          # [B, n_classes]
+        return self.head(self.norm(tokens[:, -1]))
 
 
 def make_optimizer(model, lr, wd):
-    """AdamW with weight decay only on weight matrices; biases/norms/CLS get no decay."""
     decay, no_decay = [], []
     for name, param in model.named_parameters():
         if any(nd in name for nd in ['bias', 'norm', 'cls_token']):
@@ -134,13 +146,15 @@ def preprocess(X):
 
 def make_loader(X_t, y_t, batch_size, shuffle=True):
     ds = TensorDataset(X_t, torch.tensor(y_t, dtype=torch.long))
-    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle, pin_memory=True, num_workers=2)
+    return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
+                      pin_memory=True, num_workers=2, persistent_workers=True)
 
 def make_infer_loader(X_t, batch_size=1024):
-    return DataLoader(TensorDataset(X_t), batch_size=batch_size, shuffle=False)
+    return DataLoader(TensorDataset(X_t), batch_size=batch_size, shuffle=False,
+                      pin_memory=True, num_workers=2, persistent_workers=True)
 
 # --- Train / eval helpers ---
-def train_epoch(model, optimizer, loader):
+def train_epoch(model, optimizer, loader, grad_scaler):
     model.train()
     total_loss = 0.0
     for X_batch, y_batch in loader:
@@ -148,9 +162,11 @@ def train_epoch(model, optimizer, loader):
         optimizer.zero_grad()
         with autocast('cuda'):
             loss = F.cross_entropy(model(X_batch), y_batch)
-        _grad_scaler.scale(loss).backward()
-        _grad_scaler.step(optimizer)
-        _grad_scaler.update()
+        grad_scaler.scale(loss).backward()
+        grad_scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        grad_scaler.step(optimizer)
+        grad_scaler.update()
         total_loss += loss.item() * len(y_batch)
     return total_loss / len(loader.dataset)
 
@@ -159,28 +175,29 @@ def eval_bal_acc(model, loader):
     model.eval()
     preds, labels = [], []
     for X_batch, y_batch in loader:
-        preds.append(model(X_batch.to(DEVICE)).argmax(1).cpu().numpy())
+        with autocast('cuda'):
+            preds.append(model(X_batch.to(DEVICE)).argmax(1).cpu().numpy())
         labels.append(y_batch.numpy())
     return balanced_accuracy_score(np.concatenate(labels), np.concatenate(preds))
 
 @torch.no_grad()
 def predict_proba(model, X_np, batch_size=1024):
     model.eval()
-    X_t    = preprocess(X_np)
-    loader = make_infer_loader(X_t, batch_size)
+    loader = make_infer_loader(preprocess(X_np), batch_size)
     probs  = []
     for (X_batch,) in loader:
-        probs.append(F.softmax(model(X_batch.to(DEVICE)), dim=1).cpu().numpy())
-    return np.concatenate(probs, axis=0)  # (N, 7)
+        with autocast('cuda'):
+            probs.append(F.softmax(model(X_batch.to(DEVICE)), dim=1).cpu().numpy())
+    return np.concatenate(probs, axis=0)
 
 # %% [markdown]
-# ## Cell 4 — Optuna tuning (100K subsample, 15 trials)
+# ## Cell 4 — Optuna tuning (50K subsample, 15 trials)
 
 # %%
-TUNE_N      = 100_000
-TUNE_EPOCHS = 40
-PATIENCE    = 8
-BATCH_SIZE  = 256
+TUNE_N      = 50_000   # 2× faster than 100K; enough signal for HPO
+TUNE_EPOCHS = 20
+PATIENCE    = 3        # in eval intervals (eval every 2 epochs → effective patience = 6 epochs)
+BATCH_SIZE  = 1024     # safe with Flash Attention + fp16 on 15 GB
 
 rng = np.random.default_rng(42)
 idx = rng.choice(len(X_train_full), TUNE_N, replace=False)
@@ -197,9 +214,9 @@ tune_val_loader   = make_loader(X_val_t, y_val, BATCH_SIZE * 2, shuffle=False)
 
 def objective(trial):
     torch.cuda.empty_cache()
-    d_token  = trial.suggest_categorical('d_token', [64, 128])
-    n_blocks = trial.suggest_int('n_blocks', 1, 3)
-    n_heads  = trial.suggest_categorical('n_heads', [4, 8])
+    d_token   = trial.suggest_categorical('d_token', [128, 192, 256])
+    n_blocks  = trial.suggest_int('n_blocks', 2, 4)
+    n_heads   = trial.suggest_categorical('n_heads', [4, 8])
     attn_drop = trial.suggest_float('attn_drop', 0.0, 0.3)
     ffn_drop  = trial.suggest_float('ffn_drop',  0.0, 0.3)
     ffn_mult  = trial.suggest_categorical('ffn_mult', [4/3, 2, 8/3])
@@ -218,27 +235,29 @@ def objective(trial):
         n_classes=7,
     ).to(DEVICE)
 
-    optimizer = make_optimizer(model, lr, wd)
+    optimizer  = make_optimizer(model, lr, wd)
+    grad_scaler = GradScaler('cuda')   # fresh scaler per trial — avoids state bleed on NaN
 
     best_acc, no_improve = 0.0, 0
     for epoch in range(TUNE_EPOCHS):
-        train_epoch(model, optimizer, tune_train_loader)
-        acc = eval_bal_acc(model, tune_val_loader)
-        trial.report(acc, epoch)
-        if trial.should_prune():
-            raise optuna.exceptions.TrialPruned()
-        if acc > best_acc:
-            best_acc, no_improve = acc, 0
-        else:
-            no_improve += 1
-            if no_improve >= PATIENCE:
-                break
+        train_epoch(model, optimizer, tune_train_loader, grad_scaler)
+        if epoch % 2 == 1 or epoch == TUNE_EPOCHS - 1:   # eval every 2 epochs
+            acc = eval_bal_acc(model, tune_val_loader)
+            trial.report(acc, epoch)
+            if trial.should_prune():
+                raise optuna.exceptions.TrialPruned()
+            if acc > best_acc:
+                best_acc, no_improve = acc, 0
+            else:
+                no_improve += 1
+                if no_improve >= PATIENCE:
+                    break
 
     return best_acc
 
 study = optuna.create_study(
     direction='maximize',
-    pruner=optuna.pruners.MedianPruner(n_warmup_steps=10),
+    pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
     sampler=optuna.samplers.TPESampler(seed=42),
 )
 study.optimize(objective, n_trials=15, show_progress_bar=True)
@@ -273,12 +292,15 @@ model = FTTransformer(
     n_classes=7,
 ).to(DEVICE)
 
-optimizer = make_optimizer(model, p['lr'], p['wd'])
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=FINAL_EPOCHS)
+model = torch.compile(model)   # fused CUDA kernels — ~30s first-pass compile, worth it for 100 epochs
+
+optimizer   = make_optimizer(model, p['lr'], p['wd'])
+scheduler   = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=FINAL_EPOCHS)
+grad_scaler = GradScaler('cuda')
 
 best_val, no_improve, best_state = 0.0, 0, None
 for epoch in range(FINAL_EPOCHS):
-    loss = train_epoch(model, optimizer, final_train_loader)
+    loss = train_epoch(model, optimizer, final_train_loader, grad_scaler)
     acc  = eval_bal_acc(model, final_val_loader)
     scheduler.step()
     print(f'Epoch {epoch+1:3d}  loss={loss:.4f}  val_bal_acc={acc:.4f}')
