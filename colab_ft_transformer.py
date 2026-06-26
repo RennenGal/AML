@@ -38,6 +38,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
+from torch.amp import autocast, GradScaler
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.metrics import balanced_accuracy_score
@@ -45,6 +46,8 @@ import optuna
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print('Device:', DEVICE)
+
+_grad_scaler = GradScaler('cuda')
 
 # --- FT-Transformer architecture ---
 
@@ -143,9 +146,11 @@ def train_epoch(model, optimizer, loader):
     for X_batch, y_batch in loader:
         X_batch, y_batch = X_batch.to(DEVICE), y_batch.to(DEVICE)
         optimizer.zero_grad()
-        loss = F.cross_entropy(model(X_batch), y_batch)
-        loss.backward()
-        optimizer.step()
+        with autocast('cuda'):
+            loss = F.cross_entropy(model(X_batch), y_batch)
+        _grad_scaler.scale(loss).backward()
+        _grad_scaler.step(optimizer)
+        _grad_scaler.update()
         total_loss += loss.item() * len(y_batch)
     return total_loss / len(loader.dataset)
 
@@ -175,7 +180,7 @@ def predict_proba(model, X_np, batch_size=1024):
 TUNE_N      = 100_000
 TUNE_EPOCHS = 40
 PATIENCE    = 8
-BATCH_SIZE  = 512   # reduce to 256 if you hit OOM
+BATCH_SIZE  = 256
 
 rng = np.random.default_rng(42)
 idx = rng.choice(len(X_train_full), TUNE_N, replace=False)
@@ -191,8 +196,9 @@ tune_train_loader = make_loader(X_tr_t, y_tr, BATCH_SIZE)
 tune_val_loader   = make_loader(X_val_t, y_val, BATCH_SIZE * 2, shuffle=False)
 
 def objective(trial):
-    d_token  = trial.suggest_categorical('d_token', [128, 192, 256])
-    n_blocks = trial.suggest_int('n_blocks', 2, 4)
+    torch.cuda.empty_cache()
+    d_token  = trial.suggest_categorical('d_token', [64, 128])
+    n_blocks = trial.suggest_int('n_blocks', 1, 3)
     n_heads  = trial.suggest_categorical('n_heads', [4, 8])
     attn_drop = trial.suggest_float('attn_drop', 0.0, 0.3)
     ffn_drop  = trial.suggest_float('ffn_drop',  0.0, 0.3)
