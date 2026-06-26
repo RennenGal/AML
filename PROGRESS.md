@@ -76,16 +76,16 @@
 |---|---|---|
 | LogReg baseline | 0.4867 | Starting point |
 | LightGBM (default params, 50K) | 0.8452 | 50K subsample, 3-fold CV |
-| **CatBoost (Optuna, 100 trials)** | **0.9464** | Full 500K, best so far |
+| **LightGBM (Optuna, 100 trials)** | **0.9464** | Full 500K, best so far |
 
-**Current best submission:** CatBoost 0.9464
+**Current best submission:** LightGBM 0.9464
 
 ---
 
 ## Round 3 — FT-Transformer via Google Colab
 
 ### Plan
-Beat 0.946 by ensembling CatBoost with an FT-Transformer neural network.
+Beat 0.946 by ensembling LightGBM with an FT-Transformer neural network.
 The two models make different errors, so blending soft probabilities is the main lever.
 
 ### Why FT-Transformer?
@@ -106,7 +106,7 @@ The two models make different errors, so blending soft probabilities is the main
 |---|---|
 | `colab_ft_transformer.ipynb` | Upload directly to Colab, run all cells |
 | `colab_ft_transformer.py` | Source version (same content) |
-| `ensemble_catboost_ft.py` | Blend CatBoost + FT-Transformer probs locally |
+| `ensemble_lgbm_ft.py` | Blend LightGBM + FT-Transformer probs locally |
 
 ### Colab Notebook — Cell Summary
 | Cell | What it does |
@@ -131,15 +131,15 @@ The two models make different errors, so blending soft probabilities is the main
 
 ### Ensemble strategy
 1. Colab outputs `ft_transformer_probs.npy` — shape `(200000, 7)` soft probabilities
-2. CatBoost outputs soft probabilities on the same `X_test`
-3. Blend: `ensemble = w * cb_probs + (1-w) * ft_probs`, default `w=0.5`
-4. If FT val acc << 0.946, increase CatBoost weight (e.g. `w=0.7`)
+2. LightGBM outputs soft probabilities on the same `X_test` (5-seed ensemble)
+3. Blend: `ensemble = w * lgbm_probs + (1-w) * ft_probs`, default `w=0.5`
+4. If FT val acc << 0.946, increase LightGBM weight (e.g. `w=0.7`)
 5. Final hard predictions: `argmax(ensemble_probs)`
 
 ### Steps to complete on other machine
 - [ ] Upload `competition_train.npz` to Google Drive
 - [ ] Open `colab_ft_transformer.ipynb` in Colab → T4 GPU → Run all
 - [ ] Download `ft_transformer_probs.npy` to project root
-- [ ] `conda run -n AML python ensemble_catboost_ft.py`
-- [ ] Check val score printout; tune `CB_WEIGHT` in `ensemble_catboost_ft.py` if needed
+- [ ] `conda run -n AML python ensemble_lgbm_ft.py`
+- [ ] Check val score printout; tune `LGBM_WEIGHT` in `ensemble_lgbm_ft.py` if needed
 - [ ] Submit `competition_output/1385_competition_predictions.npz`
