@@ -273,12 +273,25 @@ def checkpoint_callback(study, trial):
     if study.best_trial.number == trial.number:
         print(f'  ★ New best {trial.value:.4f} — checkpoint saved to Drive')
 
+# Persistent SQLite storage — saves full study state to Drive so sessions can be resumed.
+# On first run: creates a new study. On subsequent runs: loads existing trials and continues.
+STUDY_DB     = f'sqlite:///{SAVE_DIR}ft_optuna_study.db'
+TOTAL_TRIALS = 30
+
 study = optuna.create_study(
+    storage=STUDY_DB,
+    study_name='ft_transformer',
+    load_if_exists=True,
     direction='maximize',
     pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
     sampler=optuna.samplers.TPESampler(seed=42),
 )
-study.optimize(objective, n_trials=30, show_progress_bar=True,
+
+n_done = len([t for t in study.trials if t.value is not None])
+n_remaining = max(0, TOTAL_TRIALS - n_done)
+print(f'Completed trials so far: {n_done} / {TOTAL_TRIALS}  →  running {n_remaining} more')
+
+study.optimize(objective, n_trials=n_remaining, show_progress_bar=True,
                callbacks=[checkpoint_callback])
 
 print('\nBest val balanced accuracy:', study.best_value)
