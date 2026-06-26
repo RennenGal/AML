@@ -63,10 +63,10 @@
 
 ## TODO / Next Steps
 - [x] Quick model comparison: LightGBM, XGBoost, CatBoost, RandomForest
-- [ ] Test LightGBM GPU support (Quadro P1000, CUDA 12.8)
-- [ ] Optuna tuning of LightGBM (100K subsample, early stopping, ~50 trials)
-- [ ] Train final model on full 500K with best params
-- [ ] Multi-seed ensemble of tuned models
+- [x] Optuna tuning of CatBoost → 0.9464
+- [ ] Run FT-Transformer on Colab T4 (see Round 3 section)
+- [ ] Ensemble CatBoost + FT-Transformer soft probabilities
+- [ ] Tune ensemble weight based on FT val score
 - [ ] Final submission
 
 ---
@@ -76,5 +76,70 @@
 |---|---|---|
 | LogReg baseline | 0.4867 | Starting point |
 | LightGBM (default params, 50K) | 0.8452 | 50K subsample, 3-fold CV |
+| **CatBoost (Optuna, 100 trials)** | **0.9464** | Full 500K, best so far |
 
-**Current best submission:** None yet
+**Current best submission:** CatBoost 0.9464
+
+---
+
+## Round 3 — FT-Transformer via Google Colab
+
+### Plan
+Beat 0.946 by ensembling CatBoost with an FT-Transformer neural network.
+The two models make different errors, so blending soft probabilities is the main lever.
+
+### Why FT-Transformer?
+- State-of-the-art tabular NN (Gorishniy et al. 2021, "Revisiting Deep Learning Models for Tabular Data")
+- Each of the 500 features becomes a token; attention captures complex feature interactions
+- 500K samples is large enough for the Transformer layers to learn without overfitting
+- Low LogReg baseline (0.487) confirms deep non-linear structure → good fit
+
+### Hardware decision
+| Machine | Estimate for full tuning sweep | Decision |
+|---|---|---|
+| M1 Max (MPS, no Tensor Cores) | ~15–30 hours | Too slow |
+| Quadro P1000 (CUDA, 4 GB VRAM) | ~20–40 hours | Too slow + VRAM tight |
+| **Colab T4 (free)** | **~3–6 hours** | ✅ Use this |
+
+### Files
+| File | Purpose |
+|---|---|
+| `colab_ft_transformer.ipynb` | Upload directly to Colab, run all cells |
+| `colab_ft_transformer.py` | Source version (same content) |
+| `ensemble_catboost_ft.py` | Blend CatBoost + FT-Transformer probs locally |
+
+### Colab Notebook — Cell Summary
+| Cell | What it does |
+|---|---|
+| 1 | `pip install rtdl optuna` |
+| 2 | Mount Google Drive, load `competition_train.npz` |
+| 3 | `StandardScaler`, DataLoader helpers, train/eval functions |
+| 4 | Optuna tuning — 15 trials on 100K subsample, 40 epochs + early stopping |
+| 5 | Final model — best params, full 500K, 100 epochs + early stopping |
+| 6 | `predict_proba()` on `X_test` → saves `ft_transformer_probs.npy` to Drive |
+| 7 | (Optional) standalone hard predictions without ensemble |
+
+### Key Optuna search space
+| Hyperparameter | Range |
+|---|---|
+| `d_token` | 128 / 192 / 256 |
+| `n_blocks` | 2 – 4 |
+| `n_heads` | 4 / 8 |
+| `attn_drop`, `ffn_drop` | 0.0 – 0.3 |
+| `lr` | 1e-5 – 1e-3 (log) |
+| `wd` | 1e-6 – 1e-3 (log) |
+
+### Ensemble strategy
+1. Colab outputs `ft_transformer_probs.npy` — shape `(200000, 7)` soft probabilities
+2. CatBoost outputs soft probabilities on the same `X_test`
+3. Blend: `ensemble = w * cb_probs + (1-w) * ft_probs`, default `w=0.5`
+4. If FT val acc << 0.946, increase CatBoost weight (e.g. `w=0.7`)
+5. Final hard predictions: `argmax(ensemble_probs)`
+
+### Steps to complete on other machine
+- [ ] Upload `competition_train.npz` to Google Drive
+- [ ] Open `colab_ft_transformer.ipynb` in Colab → T4 GPU → Run all
+- [ ] Download `ft_transformer_probs.npy` to project root
+- [ ] `conda run -n AML python ensemble_catboost_ft.py`
+- [ ] Check val score printout; tune `CB_WEIGHT` in `ensemble_catboost_ft.py` if needed
+- [ ] Submit `competition_output/1385_competition_predictions.npz`
