@@ -31,6 +31,7 @@ print('Classes:', np.unique(y_train_full))
 # ## Cell 3 — FT-Transformer (pure PyTorch) + utilities
 
 # %%
+import joblib
 import json
 import math
 import os
@@ -142,6 +143,8 @@ def make_optimizer(model, lr, wd):
 # --- Preprocessing ---
 scaler = StandardScaler()
 scaler.fit(X_train_full)
+joblib.dump(scaler, os.path.join(SAVE_DIR, 'ft_scaler.pkl'))
+print('Scaler saved to Drive')
 
 def preprocess(X):
     return torch.tensor(scaler.transform(X), dtype=torch.float32)
@@ -303,7 +306,16 @@ print('Best params:', study.best_params)
 # %%
 FINAL_EPOCHS   = 200
 PATIENCE_FINAL = 20
-p = study.best_params
+
+try:
+    p = study.best_params
+    print('Loaded best params from Optuna study')
+except NameError:
+    with open(os.path.join(SAVE_DIR, 'ft_optuna_checkpoint.json')) as f:
+        p = json.load(f)['best_params']
+    print('Loaded best params from Drive checkpoint (Cell 4 was skipped)')
+
+print('Best params:', p)
 
 X_full_t = preprocess(X_train_full)
 sss2 = StratifiedShuffleSplit(n_splits=1, test_size=0.1, random_state=0)
@@ -358,6 +370,57 @@ for epoch in range(FINAL_EPOCHS):
 
 model.load_state_dict(best_state)
 print(f'\nFinal val balanced accuracy: {best_val:.4f}')
+
+# %% [markdown]
+# ## Cell 5b — Ensemble validation (find optimal LightGBM blend weight)
+
+# %%
+import lightgbm as lgb
+
+# FT-Transformer predictions on the val split (model still in memory from Cell 5)
+X_val_np = X_full_t[val_f].numpy()
+y_val_np  = y_train_full[val_f]
+ft_val_probs = predict_proba(model, X_val_np)
+
+# Train LightGBM on the same training split for a fair comparison
+lgbm_params = {
+    'learning_rate':    0.05525073160749127,
+    'num_leaves':       92,
+    'min_child_samples': 129,
+    'feature_fraction': 0.7438783619788816,
+    'bagging_fraction': 0.4978655411520851,
+    'reg_alpha':        1.875215496414817e-05,
+    'reg_lambda':       4.280817347332021e-07,
+    'objective':        'multiclass',
+    'num_class':        7,
+    'metric':           'multi_logloss',
+    'verbose':          -1,
+    'n_jobs':           -1,
+}
+
+print('Training LightGBM on training split for ensemble validation...')
+dtrain = lgb.Dataset(X_full_t[tr_f].numpy(), label=y_train_full[tr_f])
+lgbm_val_model = lgb.train(lgbm_params, dtrain, num_boost_round=1000,
+                            callbacks=[lgb.log_evaluation(period=200)])
+lgbm_val_probs = lgbm_val_model.predict(X_val_np)
+
+print('\n--- Ensemble Validation Results ---')
+ft_alone   = balanced_accuracy_score(y_val_np, ft_val_probs.argmax(1))
+lgbm_alone = balanced_accuracy_score(y_val_np, lgbm_val_probs.argmax(1))
+print(f'FT-Transformer alone:  {ft_alone:.4f}')
+print(f'LightGBM alone:        {lgbm_alone:.4f}')
+print()
+
+best_w, best_score = 0.0, ft_alone
+for w in [0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5]:
+    blend = (1 - w) * ft_val_probs + w * lgbm_val_probs
+    score = balanced_accuracy_score(y_val_np, blend.argmax(1))
+    marker = ' ◄ best' if score > best_score else ''
+    print(f'FT={1-w:.2f} + LGBM={w:.2f}:  {score:.4f}{marker}')
+    if score > best_score:
+        best_score, best_w = score, w
+
+print(f'\nRecommended LGBM_WEIGHT = {best_w} (val score: {best_score:.4f})')
 
 # %% [markdown]
 # ## Cell 6 — Save soft probabilities to Drive (for ensembling)
