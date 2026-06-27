@@ -199,7 +199,7 @@ def predict_proba(model, X_np, batch_size=1024):
 TUNE_N      = 50_000   # 2× faster than 100K; enough signal for HPO
 TUNE_EPOCHS = 35       # enough for mid/high LRs to converge; low-LR configs failing here is valid signal
 PATIENCE    = 4        # in eval intervals (eval every 2 epochs → effective patience = 8 epochs)
-BATCH_SIZE  = 1024     # safe with Flash Attention + fp16 on 15 GB
+BATCH_SIZE  = 512      # reduced from 1024 — d_token=256/n_blocks=4 OOM'd at batch=1024 on T4
 
 rng = np.random.default_rng(42)
 idx = rng.choice(len(X_train_full), TUNE_N, replace=False)
