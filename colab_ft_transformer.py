@@ -339,6 +339,8 @@ for epoch in range(FINAL_EPOCHS):
     if acc > best_val:
         best_val, no_improve = acc, 0
         best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+        torch.save(best_state, os.path.join(SAVE_DIR, 'ft_best_model.pt'))
+        print(f'  ★ New best {best_val:.4f} — weights saved to Drive')
     else:
         no_improve += 1
         if no_improve >= PATIENCE_FINAL:
