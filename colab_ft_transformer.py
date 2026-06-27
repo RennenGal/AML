@@ -301,8 +301,8 @@ print('Best params:', study.best_params)
 # ## Cell 5 — Train final model on full 500K
 
 # %%
-FINAL_EPOCHS   = 100
-PATIENCE_FINAL = 10
+FINAL_EPOCHS   = 200
+PATIENCE_FINAL = 20
 p = study.best_params
 
 X_full_t = preprocess(X_train_full)
@@ -324,19 +324,28 @@ model = FTTransformer(
     n_classes=7,
 ).to(DEVICE)
 
-model = torch.compile(model)   # fused CUDA kernels — ~30s first-pass compile, worth it for 100 epochs
+model = torch.compile(model)
 
 optimizer   = make_optimizer(model, p['lr'], p['wd'])
 scheduler   = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=FINAL_EPOCHS)
 grad_scaler = GradScaler('cuda')
 
 best_val, no_improve, best_state = 0.0, 0, None
+training_log = []
+
 for epoch in range(FINAL_EPOCHS):
     loss = train_epoch(model, optimizer, final_train_loader, grad_scaler)
     acc  = eval_bal_acc(model, final_val_loader)
     scheduler.step()
+
+    is_best = acc > best_val
+    training_log.append({'epoch': epoch + 1, 'loss': round(loss, 6), 'val_bal_acc': round(acc, 6), 'is_best': is_best})
+    with open(os.path.join(SAVE_DIR, 'ft_training_log.json'), 'w') as f:
+        json.dump(training_log, f, indent=2)
+
     print(f'Epoch {epoch+1:3d}  loss={loss:.4f}  val_bal_acc={acc:.4f}')
-    if acc > best_val:
+
+    if is_best:
         best_val, no_improve = acc, 0
         best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
         torch.save(best_state, os.path.join(SAVE_DIR, 'ft_best_model.pt'))
